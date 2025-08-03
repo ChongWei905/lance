@@ -1975,7 +1975,19 @@ mod tests {
     use rand::Rng;
     use rstest::rstest;
     use std::cmp::Ordering;
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+    use std::time::Instant;
     use tempfile::{tempdir, TempDir};
+    use lance_core::ArrowResult;
+    use lance_core::cache::LanceCache;
+    use lance_encoding::decoder::{DecoderPlugins, FilterExpression};
+    use lance_file::v2::LanceEncodingsIo;
+    use lance_file::v2::reader::{FileReader, FileReaderOptions, ReaderProjection};
+    use lance_io::object_store::ObjectStoreRegistry;
+    use lance_io::ReadBatchParams;
+    use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
+    use lance_io::stream::RecordBatchStreamAdapter;
 
     // Used to validate that futures returned are Send.
     fn require_send<T: Send>(t: T) -> T {
@@ -6148,6 +6160,192 @@ mod tests {
             &[4, 5, 6]
         );
     }
+
+
+
+
+
+    #[tokio::test]
+    async fn test_read_from_lance_file() {
+        let dataset = Dataset::open(
+            "/Users/weichong/Documents/working_area/codes/working_playground/torch_ms_plaground/simple_multi_fragment.lance")
+            .await.unwrap();
+        let row_num = dataset.count_all_rows().await.unwrap();
+        let row = dataset.take(&[10, 50, 1005, 1500, 2100, 2300, 100, 1200, 2000, 500], Arc::new(dataset.schema().clone())).await.unwrap();
+        println!("{:?}", row);
+        println!("row_num:{:?}", row_num);
+    }
+
+    #[tokio::test]
+    pub async fn test_read_from_lance_file_with_schema() {
+        let indices_file = "/Users/weichong/Documents/working_area/codes/working_playground/torch_ms_plaground/random_indices.txt";
+        let file = File::open(indices_file).unwrap();
+        let reader = BufReader::new(file);
+
+        let mut all_ms = 0;
+        let mut all_times = 0;
+
+        for (line_num, line) in reader.lines().enumerate() {
+            let line = line.unwrap();
+            let line = line.trim();
+
+            // 跳过空行
+            if line.is_empty() {
+                continue;
+            }
+
+            // 解析逗号分隔的数字
+            let numbers = parse_comma_separated(line).unwrap();
+
+            // let ms = take_from_lance_file("/Users/weichong/Documents/working_area/codes/working_playground/torch_ms_plaground/int64_data_1m.lance/data/d25d97b6-a04f-4d83-a0bf-910109d9d7bd.lance", numbers).await;
+            // let ms = take_from_lance_file("/Users/weichong/Documents/working_area/codes/working_playground/torch_ms_plaground/int64_data_1m_50.lance/data/a33d2259-3440-403d-b97b-cce50f2c2c27.lance", numbers).await;
+            // let ms = take_from_lance_file("/Users/weichong/Documents/working_area/codes/working_playground/torch_ms_plaground/int64_data_1m_100.lance/data/10f0c26f-5472-429f-a7ba-e4ddca4b4c06.lance", numbers).await;
+            // let ms = take_from_lance_file("/Users/weichong/Documents/working_area/codes/working_playground/torch_ms_plaground/string_data_1m.lance/data/fff8e204-4e54-489d-bb38-5b1b150446de.lance", numbers).await;
+            // let ms = take_from_lance_file("/Users/weichong/Documents/working_area/codes/working_playground/torch_ms_plaground/string_data_1m_50.lance/data/b6e6ed2e-2188-4983-a6d5-a6052becb0b0.lance", numbers).await;
+            // let ms = take_from_lance_file("/Users/weichong/Documents/working_area/codes/working_playground/torch_ms_plaground/string_data_1m_100.lance/data/0c9e783a-7ef1-41dd-9cd9-6f29ce56c30a.lance", numbers).await;
+            // let ms = take_from_lance_file("/Users/weichong/Documents/working_area/codes/working_playground/torch_ms_plaground/float_list_data_1m.lance/data/a57da343-4319-451d-ad2d-f52c35d61a34.lance", numbers).await;
+            // let ms = take_from_lance_file("/Users/weichong/Documents/working_area/codes/working_playground/torch_ms_plaground/list_float_data_1m_50.lance/data/98786ea7-9be9-4bb4-9d61-8b773af92c52.lance", numbers).await;
+            let ms = take_from_lance_file("/Users/weichong/Documents/working_area/codes/working_playground/torch_ms_plaground/list_float_data_1m_100.lance/data/14b3580c-b5d5-40a2-8c55-c11d28a65e76.lance", numbers).await;
+            // let ms = take_from_lance_file("/Users/weichong/Documents/working_area/codes/working_playground/torch_ms_plaground/struct_data_1m.lance/data/026cc408-8a3c-41c2-8f9b-736724084514.lance", numbers).await;
+            // let ms = take_from_lance_file("/Users/weichong/Documents/working_area/codes/working_playground/torch_ms_plaground/struct_data_1m_50.lance/data/0a6198e3-14e6-4337-bb9d-fc0835fa4bbd.lance", numbers).await;
+            // let ms = take_from_lance_file("/Users/weichong/Documents/working_area/codes/working_playground/torch_ms_plaground/struct_data_1m_100.lance/data/35d5344d-577f-4771-ad3a-060316f55c0a.lance", numbers).await;
+
+
+
+
+
+
+
+
+            all_ms = all_ms + ms;
+            all_times = all_times + 1;
+            println!("{:?}", ms);
+        }
+        println!("all_ms:{:?}", all_ms);
+        println!("all_times:{:?}", all_times);
+        println!("all_ms/all_times:{:?}", all_ms as f64 / all_times as f64);
+    }
+
+    fn parse_comma_separated(s: &str) -> Result<Vec<u64>> {
+        let mut result = Vec::new();
+
+        if s.is_empty() {
+            return Ok(result);
+        }
+
+        for part in s.split(',') {
+            let trimmed = part.trim();
+
+            if !trimmed.is_empty() {
+                let num = trimmed.parse::<u64>()
+                    .map_err(|e| e.to_string()).unwrap();
+
+                result.push(num);
+            }
+
+
+        }
+
+        Ok(result)
+    }
+
+    fn get_all_column_names(schema: &Schema) -> Vec<&str> {
+        schema.fields.iter().map(|field| field.name.as_str()).collect()
+    }
+
+
+
+    pub async fn take_from_lance_file(
+        file_path: &str,
+        row_indices: Vec<u64>
+    ) -> u64 {
+        use futures::stream::StreamExt;
+        use futures::TryStreamExt;
+        use arrow_array::RecordBatch;
+        use arrow_schema::Schema as ArrowSchema;
+        use std::sync::Arc;
+
+        let overall_start = Instant::now();
+
+
+
+        let batch_size = 8192;
+
+        // 1. 创建文件调度器
+        let scheduler = ScanScheduler::new(
+            Arc::new(ObjectStore::local()),
+            SchedulerConfig {
+                io_buffer_size_bytes: 2 * 1024 * 1024 * 1024, // 2GB 缓冲区
+            },
+        );
+
+        // 2. 打开文件
+        let file_path = Path::from(file_path);
+        let file_scheduler = scheduler
+            .open_file(&file_path, &CachedFileSize::unknown())
+            .await.unwrap();
+
+        // 4. 创建 FileReader
+        let file_reader = FileReader::try_open(
+            file_scheduler,
+            None, // 不使用基础投影，读取所有列
+            Arc::<DecoderPlugins>::default(),
+            &LanceCache::no_cache(),
+            FileReaderOptions::default(),
+        ).await.unwrap();
+
+        // 5. 创建包含所有列的投影
+        let schema = file_reader.schema();
+        let all_column_indices: Vec<u32> = (0..schema.fields.len() as u32).collect();
+
+
+        let all_columns = get_all_column_names(&schema);
+        let projection = ReaderProjection::from_column_names(LanceFileVersion::V2_0, schema, &all_columns).unwrap();
+
+        // let projection = ReaderProjection {
+        //     schema: Arc::new(Schema {
+        //         fields: schema.fields[4..7].to_vec(),
+        //         metadata: schema.metadata.clone(),
+        //     }),
+        //
+        //     column_indices: all_column_indices,
+        // };
+
+        // 6. 调用 take_rows 方法并处理 Result
+        let batches = file_reader.read_stream_projected_blocking(
+            ReadBatchParams::Indices(vec![1, 3, 9].into()),
+            1024,
+            Some(projection),
+            FilterExpression::no_filter()
+        ).unwrap()
+        .collect::<ArrowResult<Vec<_>>>()
+        .unwrap();
+
+        batches.iter().for_each(|batch| {
+            println!("{:?}", batch);
+        });
+
+        // let stream_result = file_reader.take_rows(row_indices, batch_size, projection).unwrap();
+        // let mut stream = stream_result.unwrap(); // 解包 Result<Stream, Error>
+        // let batch_stream = stream_result
+        //     .map(|task| task.task)
+        //     .buffered(16 as usize)
+        //     .boxed();
+        //
+        // let mut record_batch_stream = Box::pin(RecordBatchStreamAdapter::new(
+        //     Arc::new(ArrowSchema::from(schema.as_ref())),
+        //     batch_stream,
+        // ));
+        //
+        // let batch = record_batch_stream.next().await.unwrap().unwrap();
+        let overall_end = Instant::now();
+        println!("{:?}", overall_end - overall_start);
+        // println!("{:?}", batch);
+        (overall_end - overall_start).as_millis() as u64
+    }
+
+
+
 
     #[tokio::test]
     async fn test_datafile_partial_replacement() {

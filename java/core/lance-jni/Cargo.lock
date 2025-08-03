@@ -2218,6 +2218,7 @@ checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 name = "fsst"
 version = "0.32.0"
 dependencies = [
+ "arrow-array",
  "rand 0.8.5",
 ]
 
@@ -3184,7 +3185,6 @@ dependencies = [
  "lance-linalg",
  "lance-table",
  "log",
- "moka",
  "num-traits",
  "object_store",
  "prost",
@@ -3248,7 +3248,10 @@ version = "0.32.0"
 dependencies = [
  "arrow",
  "arrow-schema",
+ "async-trait",
+ "bytes",
  "env_logger",
+ "futures",
  "jni",
  "lance",
  "lance-core",
@@ -3261,6 +3264,7 @@ dependencies = [
  "log",
  "object_store",
  "serde_json",
+ "snafu",
  "tokio",
 ]
 

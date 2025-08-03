@@ -313,3 +313,21 @@ pub fn to_java_map<'local>(
     }
     Ok(java_map)
 }
+
+/// A cloneable reference to the JVM
+///
+/// This is used by the callback readers & writers to attach to the
+/// JVM.
+#[derive(Clone, Copy)]
+pub struct JvmRef {
+    pub val: *mut jni::sys::JavaVM,
+}
+
+impl JvmRef {
+    pub fn new(val: *mut jni::sys::JavaVM) -> Self {
+        Self { val }
+    }
+}
+
+unsafe impl Send for JvmRef {}
+

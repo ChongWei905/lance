@@ -44,6 +44,9 @@ public class LanceFileReader implements AutoCloseable {
   private static native LanceFileReader openNative(
       String fileUri, Map<String, String> storageOptions) throws IOException;
 
+  private static native LanceFileReader openNativeWithJavaIo(LanceInput inputStream, String path)
+      throws IOException;
+
   private native void closeNative(long nativeLanceFileReaderHandle) throws IOException;
 
   private native long numRowsNative() throws IOException;
@@ -54,6 +57,13 @@ public class LanceFileReader implements AutoCloseable {
       int batchSize,
       @Nullable List<String> projectedNames,
       @Nullable List<Range> ranges,
+      long streamMemoryAddress)
+      throws IOException;
+
+  private native void takeNative(
+      int batchSize,
+      @Nullable List<String> projectedNames,
+      List<Integer> row_indices,
       long streamMemoryAddress)
       throws IOException;
 
@@ -82,6 +92,14 @@ public class LanceFileReader implements AutoCloseable {
       String path, Map<String, String> storageOptions, BufferAllocator allocator)
       throws IOException {
     LanceFileReader reader = openNative(path, storageOptions);
+    reader.allocator = allocator;
+    reader.schema = reader.load_schema();
+    return reader;
+  }
+
+  public static LanceFileReader openWithJavaIo(
+      LanceInput inputStream, String path, BufferAllocator allocator) throws IOException {
+    LanceFileReader reader = openNativeWithJavaIo(inputStream, path);
     reader.allocator = allocator;
     reader.schema = reader.load_schema();
     return reader;
@@ -136,6 +154,23 @@ public class LanceFileReader implements AutoCloseable {
       throws IOException {
     try (ArrowArrayStream ffiArrowArrayStream = ArrowArrayStream.allocateNew(allocator)) {
       readAllNative(batchSize, projectedNames, ranges, ffiArrowArrayStream.memoryAddress());
+      return Data.importArrayStream(allocator, ffiArrowArrayStream);
+    }
+  }
+
+  /**
+   * Take rows from the Lance file
+   *
+   * @param batchSize the maximum number of rows to read in a single batch
+   * @param projectedNames optional list of column names to project; if null, all columns are read
+   * @param row_indices row indices.
+   * @return an ArrowReader for the Lance file
+   */
+  public ArrowReader take(
+      @Nullable List<String> projectedNames, List<Integer> row_indices, int batchSize)
+      throws IOException {
+    try (ArrowArrayStream ffiArrowArrayStream = ArrowArrayStream.allocateNew(allocator)) {
+      takeNative(batchSize, projectedNames, row_indices, ffiArrowArrayStream.memoryAddress());
       return Data.importArrayStream(allocator, ffiArrowArrayStream);
     }
   }

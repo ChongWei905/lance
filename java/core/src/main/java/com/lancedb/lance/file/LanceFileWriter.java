@@ -35,11 +35,15 @@ public class LanceFileWriter implements AutoCloseable {
   private long nativeFileWriterHandle;
   private BufferAllocator allocator;
   private DictionaryProvider dictionaryProvider;
+  private long bytesWritten;
 
   private static native LanceFileWriter openNative(
       String fileUri, Map<String, String> storageOptions) throws IOException;
 
-  private native void closeNative(long nativeLanceFileReaderHandle) throws IOException;
+  private static native LanceFileWriter openNativeWithJavaIo(LanceOutput outputStream)
+      throws IOException;
+
+  private native long closeNative(long nativeLanceFileReaderHandle) throws IOException;
 
   private native void writeNative(long batchMemoryAddress, long schemaMemoryAddress)
       throws IOException;
@@ -81,6 +85,15 @@ public class LanceFileWriter implements AutoCloseable {
     return writer;
   }
 
+  public static LanceFileWriter openWithJavaIo(
+      LanceOutput outputStream, BufferAllocator allocator, DictionaryProvider dictionaryProvider)
+      throws IOException {
+    LanceFileWriter writer = openNativeWithJavaIo(outputStream);
+    writer.allocator = allocator;
+    writer.dictionaryProvider = dictionaryProvider;
+    return writer;
+  }
+
   /**
    * Write a batch of data
    *
@@ -96,6 +109,10 @@ public class LanceFileWriter implements AutoCloseable {
     }
   }
 
+  public long length() {
+    return bytesWritten;
+  }
+
   /**
    * Close the LanceFileWriter
    *
@@ -107,6 +124,7 @@ public class LanceFileWriter implements AutoCloseable {
    */
   @Override
   public void close() throws Exception {
-    closeNative(nativeFileWriterHandle);
+    long bytes = closeNative(nativeFileWriterHandle);
+    bytesWritten = bytes;
   }
 }
