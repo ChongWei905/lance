@@ -4,8 +4,10 @@ use std::time::Instant;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::sync::Arc;
+use arrow_array::UInt32Array;
 use futures::StreamExt;
 use object_store::path::Path;
+use lance_core::ArrowResult;
 use lance_core::cache::LanceCache;
 use lance_encoding::decoder::{DecoderPlugins, FilterExpression};
 use lance_file::v2::reader::{FileReader, FileReaderOptions, ReaderProjection};
@@ -53,47 +55,28 @@ pub async fn test_full_scan_from_lance_file(
         &LanceCache::no_cache(),
         FileReaderOptions::default(),
     ).await.unwrap();
-    let mut arrow_stream = file_reader.read_stream_projected(
-        ReadBatchParams::RangeFull,
-        8192,
-        1,
-        ReaderProjection::from_whole_schema(file_reader.schema(), file_reader.metadata().version()),
-        FilterExpression::no_filter(),
-    ).unwrap();
-    while let batch_result = arrow_stream.next() {
-        match batch_result.await { batch => {
-            if (batch.is_none()) {
-                break;
-            }
-            let b = batch.unwrap().unwrap();
-            // 强制访问所有列的所有数据
-            for column in b.columns() {
-                // 访问数组的长度会触发数据加载
-                let _len = column.len();
+    let batches = tokio::task::spawn_blocking(move || {
+        file_reader
+            .read_stream_projected_blocking(
+                ReadBatchParams::RangeFull,
+                8192,
+                Some(ReaderProjection::from_whole_schema(file_reader.schema(), file_reader.metadata().version())),
+                FilterExpression::no_filter(),
+            )
+            .unwrap()
+            .collect::<ArrowResult<Vec<_>>>()
+            .unwrap()
+    })
+        .await
+        .unwrap();
+    batches.iter().for_each(|batch| {
+        for column in batch.columns() {
+            // 访问数组的长度会触发数据加载
+            let _len = column.len();
 
-                // 对于某些数组类型，还需要访问实际数据
-                match column.data_type() {
-                    arrow::datatypes::DataType::Utf8 | arrow::datatypes::DataType::LargeUtf8 => {
-                        // 对于字符串数组，访问所有值
-                        for i in 0..column.len() {
-                            let _ = column.is_valid(i);
-                        }
-                    }
-                    arrow::datatypes::DataType::Binary | arrow::datatypes::DataType::LargeBinary => {
-                        // 对于二进制数组，访问所有值
-                        for i in 0..column.len() {
-                            let _ = column.is_valid(i);
-                        }
-                    }
-                    _ => {
-                        // 对于其他类型，访问有效性掩码通常足够
-                        for i in 0..column.len() {
-                            let _ = column.is_valid(i);
-                        }
-                    }
-                }
+            for i in 0..column.len() {
+                let _ = column.is_valid(i);
             }
         }
-        }
-    }
+    });
 }
