@@ -15,6 +15,8 @@ use lance_io::object_store::{ObjectStore, ObjectStoreParams, ObjectStoreRegistry
 use lance_io::ReadBatchParams;
 use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
 use lance_io::utils::CachedFileSize;
+use rand::{thread_rng, Rng};
+
 
 #[tokio::main]
 async fn main() {
@@ -34,7 +36,7 @@ async fn main() {
         let overall_start = Instant::now();
         test_full_scan_from_lance_file(uri, uint_vec).await;
         let overall_end = Instant::now();
-        println!("{:?}", overall_end - overall_start);
+        println!("read time: {:?}", overall_end - overall_start);
     }
     if (mode == "fullscan") {
         let overall_start = Instant::now();
@@ -46,6 +48,17 @@ async fn main() {
 
     println!("测试完成！");
 }
+
+fn generate_random_numbers() -> Vec<u32> {
+    let mut rng = thread_rng();
+    let mut numbers: Vec<u32> =
+        (0..200)
+        .map(|_| rng.gen_range(1..=10000))
+        .collect();
+    numbers.sort();
+    numbers
+}
+
 
 pub async fn test_full_scan_from_lance_file(
     file_uri_str: &str,
@@ -80,24 +93,24 @@ pub async fn test_full_scan_from_lance_file(
     } else {
         read_batch_params = ReadBatchParams::RangeFull;
     }
-    let batches = tokio::task::spawn_blocking(move || {
-        file_reader
-            .read_stream_projected_blocking(
-                read_batch_params,
-                8192,
-                Some(ReaderProjection::from_whole_schema(file_reader.schema(), file_reader.metadata().version())),
-                FilterExpression::no_filter(),
-            )
-            .unwrap()
-            .collect::<ArrowResult<Vec<_>>>()
-            .unwrap()
-    })
-        .await
-        .unwrap();
-    batches.iter().for_each(|batch| {
-        for column in batch.columns() {
-            // 访问数组的长度会触发数据加载
-            let _len = column.len();
+    let mut arrow_stream = file_reader
+        .read_stream_projected(
+            read_batch_params,
+            8192,
+            16,
+            ReaderProjection::from_whole_schema(file_reader.schema(), file_reader.metadata().version()),
+            FilterExpression::no_filter(),
+        ).unwrap();
+
+    while let batch_result = arrow_stream.next() {
+        match batch_result.await { batch => {
+            if (batch.is_none()) {
+                break;
+            }
+            let b = batch.unwrap().unwrap();
+            let _len = b.num_rows();
         }
-    });
+        }
+    }
+
 }
