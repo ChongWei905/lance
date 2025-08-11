@@ -82,22 +82,51 @@ impl PageScheduler for PackedStructPageScheduler {
 
         let copy_struct_fields = self.fields.clone();
 
-        tokio::spawn(async move {
-            let bytes = bytes.await?;
+        match tokio::runtime::Handle::try_current() {
+            Ok(_handle) => {
+                // 存在运行时，使用 tokio::spawn
+                tokio::spawn(async move {
+                    let bytes = bytes.await?;
 
-            let mut combined_bytes = BytesMut::default();
-            for byte_slice in bytes {
-                combined_bytes.extend_from_slice(&byte_slice);
+                    let mut combined_bytes = BytesMut::default();
+                    for byte_slice in bytes {
+                        combined_bytes.extend_from_slice(&byte_slice);
+                    }
+
+                    Ok(Box::new(PackedStructPageDecoder {
+                        data: combined_bytes.freeze(),
+                        fields: copy_struct_fields,
+                        total_bytes_per_row: total_bytes_per_row as usize,
+                    }) as Box<dyn PrimitivePageDecoder>)
+                })
+                    .map(|join_handle| join_handle.unwrap())
+                    .boxed()
             }
+            Err(_) => {
+                // 不存在运行时，创建临时运行时执行
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create tokio runtime");
 
-            Ok(Box::new(PackedStructPageDecoder {
-                data: combined_bytes.freeze(),
-                fields: copy_struct_fields,
-                total_bytes_per_row: total_bytes_per_row as usize,
-            }) as Box<dyn PrimitivePageDecoder>)
-        })
-        .map(|join_handle| join_handle.unwrap())
-        .boxed()
+                let result = rt.block_on(async move {
+                    let bytes = bytes.await?;
+
+                    let mut combined_bytes = BytesMut::default();
+                    for byte_slice in bytes {
+                        combined_bytes.extend_from_slice(&byte_slice);
+                    }
+
+                    Ok(Box::new(PackedStructPageDecoder {
+                        data: combined_bytes.freeze(),
+                        fields: copy_struct_fields,
+                        total_bytes_per_row: total_bytes_per_row as usize,
+                    }) as Box<dyn PrimitivePageDecoder>)
+                });
+
+                futures::future::ready(result).boxed()
+            }
+        }
     }
 }
 

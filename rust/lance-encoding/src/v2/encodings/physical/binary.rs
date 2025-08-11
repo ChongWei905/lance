@@ -157,89 +157,179 @@ impl PageScheduler for BinaryPageScheduler {
         let null_adjustment = self.null_adjustment;
         let offsets_type = self.offsets_type.clone();
 
-        tokio::spawn(async move {
-            // For the following data:
-            // "abcd", "hello", "abcd", "apple", "hello", "abcd"
-            //   4,        9,     13,      18,      23,     27
-            // e.g. want to scan rows 0, 2, 4
-            // i.e. offsets are 4 | 9, 13 | 18, 23
-            // Normalization is required for decoding later on
-            // Normalize each part: 0, 4 | 0, 4 | 0, 5
-            // Remove leading zeros except first one: 0, 4 | 4 | 5
-            // Cumulative sum: 0, 4 | 8 | 13
-            // These are the normalized offsets stored in decoded_indices
-            // Rest of the workflow is continued later in BinaryPageDecoder
-            let indices_decoder = Arc::from(indices_page_decoder.await?);
-            let indices = Self::decode_indices(indices_decoder, indices_num_rows)?;
-            let decoded_indices = indices.as_primitive::<UInt64Type>();
+        // 检查是否存在 Tokio 运行时，如果没有则使用全局运行时
+        match tokio::runtime::Handle::try_current() {
+            Ok(_handle) => {
+                // 存在运行时，直接使用 tokio::spawn
+                tokio::spawn(async move {
+                    // For the following data:
+                    // "abcd", "hello", "abcd", "apple", "hello", "abcd"
+                    //   4,        9,     13,      18,      23,     27
+                    // e.g. want to scan rows 0, 2, 4
+                    // i.e. offsets are 4 | 9, 13 | 18, 23
+                    // Normalization is required for decoding later on
+                    // Normalize each part: 0, 4 | 0, 4 | 0, 5
+                    // Remove leading zeros except first one: 0, 4 | 4 | 5
+                    // Cumulative sum: 0, 4 | 8 | 13
+                    // These are the normalized offsets stored in decoded_indices
+                    // Rest of the workflow is continued later in BinaryPageDecoder
+                    let indices_decoder = Arc::from(indices_page_decoder.await?);
+                    let indices = Self::decode_indices(indices_decoder, indices_num_rows)?;
+                    let decoded_indices = indices.as_primitive::<UInt64Type>();
 
-            let mut indices_builder = IndicesNormalizer::new(num_rows, null_adjustment);
-            let mut bytes_ranges = Vec::new();
-            let mut curr_offset_index = 0;
+                    let mut indices_builder = IndicesNormalizer::new(num_rows, null_adjustment);
+                    let mut bytes_ranges = Vec::new();
+                    let mut curr_offset_index = 0;
 
-            for curr_row_range in ranges.iter() {
-                let row_start = curr_row_range.start;
-                let curr_range_len = (curr_row_range.end - row_start) as usize;
+                    for curr_row_range in ranges.iter() {
+                        let row_start = curr_row_range.start;
+                        let curr_range_len = (curr_row_range.end - row_start) as usize;
 
-                let curr_indices;
+                        let curr_indices;
 
-                if row_start == 0 {
-                    curr_indices = decoded_indices.slice(0, curr_range_len);
-                    curr_offset_index = curr_range_len;
-                } else {
-                    curr_indices = decoded_indices.slice(curr_offset_index, curr_range_len + 1);
-                    curr_offset_index += curr_range_len + 1;
-                }
+                        if row_start == 0 {
+                            curr_indices = decoded_indices.slice(0, curr_range_len);
+                            curr_offset_index = curr_range_len;
+                        } else {
+                            curr_indices = decoded_indices.slice(curr_offset_index, curr_range_len + 1);
+                            curr_offset_index += curr_range_len + 1;
+                        }
 
-                let first = if row_start == 0 {
-                    0
-                } else {
-                    indices_builder
-                        .normalize(*curr_indices.values().first().unwrap())
-                        .1
-                };
-                let last = indices_builder
-                    .normalize(*curr_indices.values().last().unwrap())
-                    .1;
-                if first != last {
-                    bytes_ranges.push(first..last);
-                }
+                        let first = if row_start == 0 {
+                            0
+                        } else {
+                            indices_builder
+                                .normalize(*curr_indices.values().first().unwrap())
+                                .1
+                        };
+                        let last = indices_builder
+                            .normalize(*curr_indices.values().last().unwrap())
+                            .1;
+                        if first != last {
+                            bytes_ranges.push(first..last);
+                        }
 
-                indices_builder.extend(&curr_indices, row_start == 0);
+                        indices_builder.extend(&curr_indices, row_start == 0);
+                    }
+
+                    let (indices, validity) = indices_builder.into_parts();
+                    let decoded_indices = UInt64Array::from(indices);
+
+                    // In the indirect task we schedule the bytes, but we do not await them.  We don't want to
+                    // await the bytes until the decoder is ready for them so that we don't release the backpressure
+                    // too early
+                    let bytes_decoder_fut =
+                        copy_bytes_scheduler.schedule_ranges(&bytes_ranges, &copy_scheduler, top_level_row);
+
+                    Ok(IndirectData {
+                        decoded_indices,
+                        validity,
+                        offsets_type,
+                        bytes_decoder_fut,
+                    })
+                })
+                    // Propagate join panic
+                    .map(|join_handle| join_handle.unwrap())
+                    .and_then(|indirect_data| {
+                        async move {
+                            // Later, this will be called once the decoder actually starts polling.  At that point
+                            // we await the bytes (releasing the backpressure)
+                            let bytes_decoder = indirect_data.bytes_decoder_fut.await?;
+                            Ok(Box::new(BinaryPageDecoder {
+                                decoded_indices: indirect_data.decoded_indices,
+                                offsets_type: indirect_data.offsets_type,
+                                validity: indirect_data.validity,
+                                bytes_decoder,
+                            }) as Box<dyn PrimitivePageDecoder>)
+                        }
+                    })
+                    .boxed()
             }
+            Err(_) => {
+                // 不存在运行时，使用全局运行时执行
+                let result = crate::decoder::WAITER_RT.block_on
+                (async move {
+                    // For the following data:
+                    // "abcd", "hello", "abcd", "apple", "hello", "abcd"
+                    //   4,        9,     13,      18,      23,     27
+                    // e.g. want to scan rows 0, 2, 4
+                    // i.e. offsets are 4 | 9, 13 | 18, 23
+                    // Normalization is required for decoding later on
+                    // Normalize each part: 0, 4 | 0, 4 | 0, 5
+                    // Remove leading zeros except first one: 0, 4 | 4 | 5
+                    // Cumulative sum: 0, 4 | 8 | 13
+                    // These are the normalized offsets stored in decoded_indices
+                    // Rest of the workflow is continued later in BinaryPageDecoder
+                    let indices_decoder = Arc::from(indices_page_decoder.await?);
+                    let indices = Self::decode_indices(indices_decoder, indices_num_rows)?;
+                    let decoded_indices = indices.as_primitive::<UInt64Type>();
 
-            let (indices, validity) = indices_builder.into_parts();
-            let decoded_indices = UInt64Array::from(indices);
+                    let mut indices_builder = IndicesNormalizer::new(num_rows, null_adjustment);
+                    let mut bytes_ranges = Vec::new();
+                    let mut curr_offset_index = 0;
 
-            // In the indirect task we schedule the bytes, but we do not await them.  We don't want to
-            // await the bytes until the decoder is ready for them so that we don't release the backpressure
-            // too early
-            let bytes_decoder_fut =
-                copy_bytes_scheduler.schedule_ranges(&bytes_ranges, &copy_scheduler, top_level_row);
+                    for curr_row_range in ranges.iter() {
+                        let row_start = curr_row_range.start;
+                        let curr_range_len = (curr_row_range.end - row_start) as usize;
 
-            Ok(IndirectData {
-                decoded_indices,
-                validity,
-                offsets_type,
-                bytes_decoder_fut,
-            })
-        })
-        // Propagate join panic
-        .map(|join_handle| join_handle.unwrap())
-        .and_then(|indirect_data| {
-            async move {
-                // Later, this will be called once the decoder actually starts polling.  At that point
-                // we await the bytes (releasing the backpressure)
-                let bytes_decoder = indirect_data.bytes_decoder_fut.await?;
-                Ok(Box::new(BinaryPageDecoder {
-                    decoded_indices: indirect_data.decoded_indices,
-                    offsets_type: indirect_data.offsets_type,
-                    validity: indirect_data.validity,
-                    bytes_decoder,
-                }) as Box<dyn PrimitivePageDecoder>)
+                        let curr_indices;
+
+                        if row_start == 0 {
+                            curr_indices = decoded_indices.slice(0, curr_range_len);
+                            curr_offset_index = curr_range_len;
+                        } else {
+                            curr_indices = decoded_indices.slice(curr_offset_index, curr_range_len + 1);
+                            curr_offset_index += curr_range_len + 1;
+                        }
+
+                        let first = if row_start == 0 {
+                            0
+                        } else {
+                            indices_builder
+                                .normalize(*curr_indices.values().first().unwrap())
+                                .1
+                        };
+                        let last = indices_builder
+                            .normalize(*curr_indices.values().last().unwrap())
+                            .1;
+                        if first != last {
+                            bytes_ranges.push(first..last);
+                        }
+
+                        indices_builder.extend(&curr_indices, row_start == 0);
+                    }
+
+                    let (indices, validity) = indices_builder.into_parts();
+                    let decoded_indices = UInt64Array::from(indices);
+
+                    // In the indirect task we schedule the bytes, but we do not await them.  We don't want to
+                    // await the bytes until the decoder is ready for them so that we don't release the backpressure
+                    // too early
+                    let bytes_decoder_fut =
+                        copy_bytes_scheduler.schedule_ranges(&bytes_ranges, &copy_scheduler, top_level_row);
+
+                    let indirect_data = IndirectData {
+                        decoded_indices,
+                        validity,
+                        offsets_type,
+                        bytes_decoder_fut,
+                    };
+
+                    // Later, this will be called once the decoder actually starts polling.  At that point
+                    // we await the bytes (releasing the backpressure)
+                    let bytes_decoder = indirect_data.bytes_decoder_fut.await?;
+                    Ok(Box::new(BinaryPageDecoder {
+                        decoded_indices: indirect_data.decoded_indices,
+                        offsets_type: indirect_data.offsets_type,
+                        validity: indirect_data.validity,
+                        bytes_decoder,
+                    }) as Box<dyn PrimitivePageDecoder>)
+                });
+
+                // 将结果包装为 Future 以保持一致的返回类型
+                futures::future::ready(result).boxed()
             }
-        })
-        .boxed()
+        }
     }
 }
 

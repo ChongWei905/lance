@@ -16,7 +16,9 @@ use lance_arrow::DataTypeExt;
 use lance_core::{Error, Result};
 use snafu::location;
 use std::collections::HashMap;
-
+use std::future::Future;
+use std::pin::Pin;
+use tokio::runtime::Handle;
 use crate::buffer::LanceBuffer;
 use crate::data::{
     BlockInfo, DataBlock, DictionaryDataBlock, FixedWidthDataBlock, NullableDataBlock,
@@ -88,7 +90,7 @@ impl PageScheduler for DictionaryPageScheduler {
         let copy_size = self.num_dictionary_items as u64;
 
         if self.should_decode_dict {
-            tokio::spawn(async move {
+            let future = async move {
                 let items_decoder: Arc<dyn PrimitivePageDecoder> =
                     Arc::from(items_page_decoder.await?);
 
@@ -110,9 +112,30 @@ impl PageScheduler for DictionaryPageScheduler {
                     decoded_dict,
                     indices_decoder,
                 }) as Box<dyn PrimitivePageDecoder>)
-            })
-            .map(|join_handle| join_handle.unwrap())
-            .boxed()
+            };
+
+            // 检查是否存在当前运行时
+            match Handle::try_current() {
+                Ok(_handle) => {
+                    // 存在运行时，直接使用 tokio::spawn
+                    tokio::spawn(future)
+                        .map(|join_handle| join_handle.unwrap())
+                        .boxed()
+                }
+                Err(_) => {
+                    // 不存在运行时，创建一个新的运行时来执行
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("Failed to create Tokio runtime");
+
+                    let result = rt.block_on(future);
+
+                    // 将结果包装为 Future 以保持一致的返回类型
+                    Box::pin(async move { result }) as Pin<Box<dyn Future<Output = _> + Send>>
+                }
+            }
+
         } else {
             let num_dictionary_items = self.num_dictionary_items;
             tokio::spawn(async move {
