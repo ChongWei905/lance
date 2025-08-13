@@ -16,10 +16,12 @@ package com.lancedb.lance.file;
 import com.lancedb.lance.JniLoader;
 import com.lancedb.lance.util.Range;
 
+import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.ipc.ArrowReader;
 import org.apache.arrow.vector.types.pojo.Schema;
 
@@ -60,11 +62,27 @@ public class LanceFileReader implements AutoCloseable {
       long streamMemoryAddress)
       throws IOException;
 
+  private native void readAllDataNative(
+      int batchSize,
+      @Nullable List<String> projectedNames,
+      @Nullable List<Range> ranges,
+      long arrowArrayAddress,
+      long arrowSchemaAddress)
+      throws IOException;
+
   private native void takeNative(
       int batchSize,
       @Nullable List<String> projectedNames,
       List<Integer> row_indices,
       long streamMemoryAddress)
+      throws IOException;
+
+  private native void takeDataNative(
+      int batchSize,
+      @Nullable List<String> projectedNames,
+      List<Integer> row_indices,
+      long arrowArrayAddress,
+      long arrowSchemaAddress)
       throws IOException;
 
   private LanceFileReader() {}
@@ -158,6 +176,21 @@ public class LanceFileReader implements AutoCloseable {
     }
   }
 
+  public VectorSchemaRoot readAllData(
+      @Nullable List<String> projectedNames, @Nullable List<Range> ranges, int batchSize)
+      throws IOException {
+    try (ArrowSchema arrowSchema = ArrowSchema.allocateNew(allocator);
+        ArrowArray arrowArray = ArrowArray.allocateNew(allocator)) {
+      readAllDataNative(
+          batchSize,
+          projectedNames,
+          ranges,
+          arrowArray.memoryAddress(),
+          arrowSchema.memoryAddress());
+      return Data.importVectorSchemaRoot(allocator, arrowArray, arrowSchema, null);
+    }
+  }
+
   /**
    * Take rows from the Lance file
    *
@@ -172,6 +205,21 @@ public class LanceFileReader implements AutoCloseable {
     try (ArrowArrayStream ffiArrowArrayStream = ArrowArrayStream.allocateNew(allocator)) {
       takeNative(batchSize, projectedNames, row_indices, ffiArrowArrayStream.memoryAddress());
       return Data.importArrayStream(allocator, ffiArrowArrayStream);
+    }
+  }
+
+  public VectorSchemaRoot takeData(
+      @Nullable List<String> projectedNames, List<Integer> row_indices, int batchSize)
+      throws IOException {
+    try (ArrowSchema arrowSchema = ArrowSchema.allocateNew(allocator);
+        ArrowArray arrowArray = ArrowArray.allocateNew(allocator)) {
+      takeDataNative(
+          batchSize,
+          projectedNames,
+          row_indices,
+          arrowArray.memoryAddress(),
+          arrowSchema.memoryAddress());
+      return Data.importVectorSchemaRoot(allocator, arrowArray, arrowSchema, null);
     }
   }
 }

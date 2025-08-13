@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::mem;
 use std::ops::Range;
+use std::ptr::null;
 use std::sync::{Arc, Mutex};
 
 use crate::utils::to_rust_map;
@@ -10,11 +11,14 @@ use crate::{
     utils::JvmRef,
     JNIEnvExt, RT,
 };
-use arrow::{array::RecordBatchReader, ffi::FFI_ArrowSchema, ffi_stream::FFI_ArrowArrayStream};
+use arrow::{array::RecordBatchReader, ffi::{FFI_ArrowSchema, to_ffi}, ffi_stream::FFI_ArrowArrayStream};
+use arrow::array::{Array, RecordBatch, StructArray};
+use arrow::compute::concat_batches;
+use arrow::ffi::FFI_ArrowArray;
 use arrow_schema::SchemaRef;
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{future::BoxFuture, FutureExt};
+use futures::{future::BoxFuture, FutureExt, StreamExt};
 use jni::objects::JMap;
 use jni::{
     errors::Error as JniError,
@@ -506,6 +510,173 @@ pub extern "system" fn Java_com_lancedb_lance_file_LanceFileReader_takeNative(
     }
 }
 
+#[no_mangle]
+pub extern "system" fn Java_com_lancedb_lance_file_LanceFileReader_takeDataNative(
+    mut env: JNIEnv<'_>,
+    reader: JObject,
+    batch_size: jint,
+    projected_names: JObject,
+    row_indices: JObject,
+    arrow_array_addr: jlong,
+    arrow_schema_addr: jlong,
+) {
+    let result = (|| -> Result<()> {
+        let mut read_parameter = ReadBatchParams::default();
+        let mut reader_projection: Option<ReaderProjection> = None;
+        // We get reader here not from env.get_rust_field, because we need reader: MutexGuard<BlockingFileReader> has no relationship with the env lifecycle.
+        // If we get reader from env.get_rust_field, we can't use env (can't borrow again) until we drop the reader.
+        #[allow(unused_variables)]
+        let reader = unsafe {
+            let reader_ref = reader.as_ref();
+            let ptr = env.get_field(reader_ref, NATIVE_READER, "J")?.j()?
+                as *mut Mutex<BlockingFileReader>;
+            let guard = env.lock_obj(reader_ref)?;
+            if ptr.is_null() {
+                return Err(Error::io_error(
+                    "FileReader has already been closed".to_string(),
+                ));
+            }
+            (*ptr).lock().unwrap()
+        };
+
+        let file_version = reader.inner.metadata().version();
+
+        if !projected_names.is_null() {
+            let schema = Schema::try_from(reader.schema()?.as_ref())?;
+            let column_names: Vec<String> = env.get_strings(&projected_names)?;
+            let names: Vec<&str> = column_names.iter().map(|s| s.as_str()).collect();
+            reader_projection = Some(ReaderProjection::from_column_names(
+                file_version,
+                &schema,
+                names.as_slice(),
+            )?);
+        }
+
+        if row_indices.is_null() {
+            return Err(Error::input_error(
+                "Row indices cannot be null".to_string(),
+            ));
+        }
+        let expected_row_indecis: Vec<u32> = unsafe { mem::transmute(env.get_integers(&row_indices)?) };
+        read_parameter = ReadBatchParams::Indices(expected_row_indecis.into());
+
+        inner_read_all_data(
+            &reader,
+            batch_size,
+            read_parameter,
+            reader_projection,
+            FilterExpression::no_filter(),
+            arrow_array_addr,
+            arrow_schema_addr,
+        )
+    })();
+    if let Err(e) = result {
+        e.throw(&mut env);
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_lancedb_lance_file_LanceFileReader_readAllDataNative(
+    mut env: JNIEnv<'_>,
+    reader: JObject,
+    batch_size: jint,
+    projected_names: JObject,
+    selection_ranges: JObject,
+    arrow_array_addr: jlong,
+    arrow_schema_addr: jlong,
+) {
+    let result = (|| -> Result<()> {
+        let mut read_parameter = ReadBatchParams::default();
+        let mut reader_projection: Option<ReaderProjection> = None;
+        // We get reader here not from env.get_rust_field, because we need reader: MutexGuard<BlockingFileReader> has no relationship with the env lifecycle.
+        // If we get reader from env.get_rust_field, we can't use env (can't borrow again) until we drop the reader.
+        #[allow(unused_variables)]
+        let reader = unsafe {
+            let reader_ref = reader.as_ref();
+            let ptr = env.get_field(reader_ref, NATIVE_READER, "J")?.j()?
+                as *mut Mutex<BlockingFileReader>;
+            let guard = env.lock_obj(reader_ref)?;
+            if ptr.is_null() {
+                return Err(Error::io_error(
+                    "FileReader has already been closed".to_string(),
+                ));
+            }
+            (*ptr).lock().unwrap()
+        };
+
+        let file_version = reader.inner.metadata().version();
+
+        if !projected_names.is_null() {
+            let schema = Schema::try_from(reader.schema()?.as_ref())?;
+            let column_names: Vec<String> = env.get_strings(&projected_names)?;
+            let names: Vec<&str> = column_names.iter().map(|s| s.as_str()).collect();
+            reader_projection = Some(ReaderProjection::from_column_names(
+                file_version,
+                &schema,
+                names.as_slice(),
+            )?);
+        }
+
+        if !selection_ranges.is_null() {
+            let mut ranges: Vec<Range<u64>> = Vec::new();
+            let jlist = env.get_list(&selection_ranges)?;
+            let mut j_list_iter = jlist.iter(&mut env)?;
+
+            loop {
+                let item = j_list_iter.next(&mut env)?;
+                if item.is_none() {
+                    break; // End of the list
+                }
+
+                let item_obj = item.unwrap();
+                if item_obj.is_null() {
+                    continue;
+                }
+
+                let start_val = env
+                    .call_method(&item_obj, "getStart", "()I", &[])
+                    .and_then(|v| v.i())?;
+                let end_val = env
+                    .call_method(&item_obj, "getEnd", "()I", &[])
+                    .and_then(|v| v.i())?;
+
+                if start_val < 0 || end_val < 0 {
+                    return Err(Error::input_error(format!(
+                        "Invalid range values (negative): start={}, end={}",
+                        start_val, end_val
+                    )));
+                }
+                if start_val > end_val {
+                    return Err(Error::input_error(format!(
+                        "Invalid range (start > end): start={}, end={}",
+                        start_val, end_val
+                    )));
+                }
+
+                ranges.push(Range {
+                    start: start_val as u64,
+                    end: end_val as u64,
+                });
+
+                env.delete_local_ref(item_obj)?;
+            }
+            read_parameter = ReadBatchParams::Ranges(ranges.into_boxed_slice().into());
+        }
+        inner_read_all_data(
+            &reader,
+            batch_size,
+            read_parameter,
+            reader_projection,
+            FilterExpression::no_filter(),
+            arrow_array_addr,
+            arrow_schema_addr,
+        )
+    })();
+    if let Err(e) = result {
+        e.throw(&mut env);
+    }
+}
+
 fn inner_read_all(
     reader: &BlockingFileReader,
     batch_size: jint,
@@ -522,5 +693,48 @@ fn inner_read_all(
     )?;
     let ffi_stream = FFI_ArrowArrayStream::new(arrow_stream);
     unsafe { std::ptr::write_unaligned(stream_addr as *mut FFI_ArrowArrayStream, ffi_stream) }
+    Ok(())
+}
+
+fn inner_read_all_data(
+    reader: &BlockingFileReader,
+    batch_size: jint,
+    read_batch_params: ReadBatchParams,
+    reader_projection: Option<ReaderProjection>,
+    filter_expression: FilterExpression,
+    arrow_array_addr: jlong,
+    arrow_schema_addr: jlong,
+) -> Result<()> {
+    let merged_batch = RT.block_on(async move {
+        let mut arrow_stream = reader.inner.read_stream_projected(
+            read_batch_params,
+            batch_size as u32,
+            16,
+            ReaderProjection::from_whole_schema(reader.inner.schema(), reader.inner.metadata().version()),
+            filter_expression,
+        ).unwrap();
+        let mut batches: Vec<RecordBatch> = Vec::new();
+        while let batch_result = arrow_stream.next() {
+            match batch_result.await { batch => {
+                if batch.is_none() {
+                    break;
+                }
+                batches.push(batch.unwrap().unwrap());
+            }
+            }
+        }
+        let write_schema = batches[0].schema();
+        let batch_refs: Vec<&RecordBatch> = batches.iter().collect();
+        concat_batches(&write_schema, batch_refs).unwrap()
+    });
+
+    let struct_array: StructArray = merged_batch.into();
+    let array_data = struct_array.to_data();
+
+    let (arrow_array, arrow_schema) = to_ffi(&array_data).unwrap();
+    unsafe {
+        std::ptr::write_unaligned(arrow_schema_addr as *mut FFI_ArrowSchema, arrow_schema);
+        std::ptr::write_unaligned(arrow_array_addr as *mut FFI_ArrowArray, arrow_array);
+    }
     Ok(())
 }
