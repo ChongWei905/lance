@@ -13,11 +13,12 @@
  */
 package com.lancedb.lance.file;
 
+import com.lancedb.lance.ArrowAddressResult;
+import com.lancedb.lance.ArrowAddressStreamReader;
 import com.lancedb.lance.JniLoader;
 import com.lancedb.lance.util.Range;
 
 import org.apache.arrow.c.ArrowArray;
-import org.apache.arrow.c.ArrowArrayStream;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.Data;
 import org.apache.arrow.memory.BufferAllocator;
@@ -55,11 +56,8 @@ public class LanceFileReader implements AutoCloseable {
 
   private native void populateSchemaNative(long arrowSchemaMemoryAddress);
 
-  private native void readAllNative(
-      int batchSize,
-      @Nullable List<String> projectedNames,
-      @Nullable List<Range> ranges,
-      long streamMemoryAddress)
+  private native ArrowAddressResult readAllNative(
+      int batchSize, @Nullable List<String> projectedNames, @Nullable List<Range> ranges)
       throws IOException;
 
   private native void readAllDataNative(
@@ -70,11 +68,8 @@ public class LanceFileReader implements AutoCloseable {
       long arrowSchemaAddress)
       throws IOException;
 
-  private native void takeNative(
-      int batchSize,
-      @Nullable List<String> projectedNames,
-      List<Integer> row_indices,
-      long streamMemoryAddress)
+  private native ArrowAddressResult takeNative(
+      int batchSize, @Nullable List<String> projectedNames, List<Integer> row_indices)
       throws IOException;
 
   private native void takeDataNative(
@@ -170,10 +165,8 @@ public class LanceFileReader implements AutoCloseable {
   public ArrowReader readAll(
       @Nullable List<String> projectedNames, @Nullable List<Range> ranges, int batchSize)
       throws IOException {
-    try (ArrowArrayStream ffiArrowArrayStream = ArrowArrayStream.allocateNew(allocator)) {
-      readAllNative(batchSize, projectedNames, ranges, ffiArrowArrayStream.memoryAddress());
-      return Data.importArrayStream(allocator, ffiArrowArrayStream);
-    }
+    ArrowAddressResult result = readAllNative(batchSize, projectedNames, ranges);
+    return new ArrowAddressStreamReader(allocator, result);
   }
 
   public VectorSchemaRoot readAllData(
@@ -202,10 +195,8 @@ public class LanceFileReader implements AutoCloseable {
   public ArrowReader take(
       @Nullable List<String> projectedNames, List<Integer> row_indices, int batchSize)
       throws IOException {
-    try (ArrowArrayStream ffiArrowArrayStream = ArrowArrayStream.allocateNew(allocator)) {
-      takeNative(batchSize, projectedNames, row_indices, ffiArrowArrayStream.memoryAddress());
-      return Data.importArrayStream(allocator, ffiArrowArrayStream);
-    }
+    ArrowAddressResult result = takeNative(batchSize, projectedNames, row_indices);
+    return new ArrowAddressStreamReader(allocator, result);
   }
 
   public VectorSchemaRoot takeData(
@@ -219,6 +210,7 @@ public class LanceFileReader implements AutoCloseable {
           row_indices,
           arrowArray.memoryAddress(),
           arrowSchema.memoryAddress());
+
       return Data.importVectorSchemaRoot(allocator, arrowArray, arrowSchema, null);
     }
   }
