@@ -422,6 +422,11 @@ pub extern "system" fn Java_com_lancedb_lance_file_LanceFileReader_readAllNative
             &schema,
             names.as_slice(),
         ).unwrap());
+    } else {
+        reader_projection = Some(ReaderProjection::from_whole_schema(
+            reader.inner.schema(),
+            reader.inner.metadata().version()
+        ))
     }
 
     if !selection_ranges.is_null() {
@@ -787,7 +792,7 @@ fn inner_read_all_data_batches(
             read_batch_params,
             batch_size as u32,
             16,
-            ReaderProjection::from_whole_schema(reader.inner.schema(), reader.inner.metadata().version()),
+            reader_projection.unwrap(),
             filter_expression,
         ).unwrap();
         let mut batch_data_vec: Vec<jlong> = Vec::new();

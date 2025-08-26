@@ -6,10 +6,14 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use arrow_array::RecordBatch;
+use arrow_array::{Array, ArrayRef, RecordBatch};
 
 use arrow_data::ArrayData;
+use arrow_schema::DataType;
 use bytes::{BufMut, Bytes, BytesMut};
+use datafusion::functions_aggregate::min_max::{MaxAccumulator, MinAccumulator};
+use datafusion_common::ScalarValue;
+use datafusion_expr::Accumulator;
 use futures::stream::FuturesOrdered;
 use futures::StreamExt;
 use lance_core::datatypes::{Field, Schema as LanceSchema};
@@ -107,6 +111,25 @@ pub struct FileWriter {
     schema_metadata: HashMap<String, String>,
     options: FileWriterOptions,
     bytes_written: i64,
+    statistics: Option<StatisticsGenerator>,
+}
+
+pub struct StatisticsGenerator {
+    row_count: i64,
+    value_counts: HashMap<i32, i64>,
+    null_value_counts: HashMap<i32, i64>,
+    nan_value_counts: HashMap<i32, i64>,
+    min_values: HashMap<i32, MinAccumulator>,
+    max_values: HashMap<i32, MaxAccumulator>,
+}
+
+pub struct Statistics {
+    row_count: i64,
+    value_counts: HashMap<i32, i64>,
+    null_value_counts: HashMap<i32, i64>,
+    nan_value_counts: HashMap<i32, i64>,
+    min_values: HashMap<i32, ScalarValue>,
+    max_values: HashMap<i32, ScalarValue>,
 }
 
 fn initial_column_metadata() -> pbfile::ColumnMetadata {
@@ -119,6 +142,77 @@ fn initial_column_metadata() -> pbfile::ColumnMetadata {
 }
 
 static WARNED_ON_UNSTABLE_API: AtomicBool = AtomicBool::new(false);
+
+impl StatisticsGenerator {
+    pub fn new() -> Self {
+        Self {
+            row_count: 0,
+            value_counts: HashMap::new(),
+            null_value_counts: HashMap::new(),
+            nan_value_counts: HashMap::new(),
+            min_values: HashMap::new(),
+            max_values: HashMap::new(),
+        }
+    }
+
+    pub fn update_batch(&mut self, batch: &RecordBatch) {
+        self.row_count += batch.num_rows() as i64;
+        batch.columns().iter().enumerate().for_each(|(field_idx, col)| {
+            let null_count = col.null_count() as i64;
+            let nan_count = Self::count_nans(col) as i64;
+            let value_counts = col.len() as i64 - null_count;
+            *self.value_counts.entry(field_idx as i32).or_insert(0) += value_counts;
+            *self.null_value_counts.entry(field_idx as i32).or_insert(0) += null_count;
+            *self.nan_value_counts.entry(field_idx as i32).or_insert(0) += nan_count;
+
+            let items_type = batch.schema().field(field_idx).data_type().clone();
+            let min_accumulator = self.min_values.entry(field_idx as i32)
+                .or_insert(MinAccumulator::try_new(&items_type).unwrap());
+            let max_accumulator = self.max_values.entry(field_idx as i32)
+                .or_insert(MaxAccumulator::try_new(&items_type).unwrap());
+            min_accumulator.update_batch(std::slice::from_ref(col));
+            max_accumulator.update_batch(std::slice::from_ref(col));
+        })
+    }
+
+    fn count_nans(array: &ArrayRef) -> u32 {
+        match array.data_type() {
+            DataType::Float16 => {
+                let array = array
+                    .as_any()
+                    .downcast_ref::<arrow_array::Float16Array>()
+                    .unwrap();
+                array.values().iter().filter(|&&x| x.is_nan()).count() as u32
+            }
+            DataType::Float32 => {
+                let array = array
+                    .as_any()
+                    .downcast_ref::<arrow_array::Float32Array>()
+                    .unwrap();
+                array.values().iter().filter(|&&x| x.is_nan()).count() as u32
+            }
+            DataType::Float64 => {
+                let array = array
+                    .as_any()
+                    .downcast_ref::<arrow_array::Float64Array>()
+                    .unwrap();
+                array.values().iter().filter(|&&x| x.is_nan()).count() as u32
+            }
+            _ => 0, // Non-float types don't have NaNs
+        }
+    }
+
+    fn generate_statistics(&self) -> Statistics {
+        Statistics {
+            row_count: self.row_count,
+            value_counts: self.value_counts.clone(),
+            null_value_counts: self.null_value_counts,
+            nan_value_counts: self.nan_value_counts,
+            min_values: self.min_values.iter().map(|(k, v)| (*k, v.min())).collect(),
+            max_values: self.max_values.iter().map(|(k, v)| (*k, v.max())).collect(),
+        }
+    }
+}
 
 impl FileWriter {
     /// Create a new FileWriter with a desired output schema
@@ -168,6 +262,7 @@ impl FileWriter {
             schema_metadata: HashMap::new(),
             options,
             bytes_written: 0,
+            statistics: Some(StatisticsGenerator::new()),
         }
     }
 
@@ -260,6 +355,13 @@ impl FileWriter {
     ) -> Result<()> {
         for batch in batches {
             self.write_batch(batch).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn update_statistics(&mut self, batch: &RecordBatch) -> Result<()> {
+        if let Some(statistics) = self.statistics.as_mut() {
+            statistics.update_batch(batch);
         }
         Ok(())
     }
