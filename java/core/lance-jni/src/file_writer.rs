@@ -290,7 +290,7 @@ fn inner_open<'local>(
         Result::Ok(FileWriter::new_lazy(
             obj_writer,
             FileWriterOptions {
-                format_version: Some(LanceFileVersion::V2_1),
+                format_version: Some(LanceFileVersion::V2_0),
                 ..Default::default()
             },
         ))
@@ -397,6 +397,7 @@ fn inner_write_batch(
 
     let mut writer = writer.inner.lock().unwrap();
     RT.block_on(writer.write_batch(&record_batch))?;
+    RT.block_on(writer.update_statistics(&record_batch))?;
     Ok(())
 }
 

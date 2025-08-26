@@ -386,6 +386,11 @@ pub extern "system" fn Java_com_lancedb_lance_file_LanceFileReader_readAllNative
                 &schema,
                 names.as_slice(),
             )?);
+        } else {
+            reader_projection = Some(ReaderProjection::from_whole_schema(
+                reader.inner.schema(),
+                reader.inner.metadata().version()
+            ))
         }
 
         if !selection_ranges.is_null() {
