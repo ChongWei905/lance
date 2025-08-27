@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
     task::Poll,
 };
-
+use std::collections::HashMap;
 use crate::utils::to_rust_map;
 use crate::{
     error::{Error, Result},
@@ -19,6 +19,7 @@ use arrow::{
 };
 use arrow_schema::DataType;
 use async_trait::async_trait;
+use datafusion_common::ScalarValue;
 use jni::{
     errors::Error as JniError,
     objects::{GlobalRef, JObject, JMap, JString, JValueGen},
@@ -33,10 +34,11 @@ use lance_file::{
 };
 use lance_io::object_store::{ObjectStoreParams, ObjectStoreRegistry};
 use std::convert::TryInto;
+use jni::sys::{jboolean, jdouble, jfloat, jint};
 use lance_io::traits::Writer;
 use snafu::location;
 use tokio::{io::AsyncWrite, task::JoinHandle};
-
+use lance_file::v2::writer::Statistics;
 
 pub const NATIVE_WRITER: &str = "nativeFileWriterHandle";
 
@@ -328,6 +330,354 @@ fn inner_open_with_java_io<'local>(
     let writer = BlockingFileWriter::create(writer);
 
     writer.into_java(env)
+}
+
+pub fn scalar_value_to_java_object<'local>(
+    env: &mut JNIEnv<'local>,
+    scalar: &ScalarValue,
+) -> Result<JObject<'local>> {
+    match scalar {
+        ScalarValue::Boolean(Some(val)) => {
+            let java_boolean = env.new_object(
+                "java/lang/Boolean",
+                "(Z)V",
+                &[JValueGen::Bool(*val as jboolean)],
+            )?;
+            Ok(java_boolean)
+        },
+
+        ScalarValue::Int8(Some(val)) => {
+            let java_byte = env.new_object(
+                "java/lang/Integer",
+                "(B)V",
+                &[JValueGen::Int(*val as jint)],
+            )?;
+            Ok(java_byte)
+        },
+
+        ScalarValue::Int16(Some(val)) => {
+            let java_short = env.new_object(
+                "java/lang/Integer",
+                "(S)V",
+                &[JValueGen::Int(*val as jint)],
+            )?;
+            Ok(java_short)
+        },
+
+        ScalarValue::Int32(Some(val)) => {
+            let java_integer = env.new_object(
+                "java/lang/Integer",
+                "(I)V",
+                &[JValueGen::Int(*val as jint)],
+            )?;
+            Ok(java_integer)
+        },
+
+        ScalarValue::Int64(Some(val)) => {
+            let java_long = env.new_object(
+                "java/lang/Long",
+                "(J)V",
+                &[JValueGen::Long(*val as jlong)],
+            )?;
+            Ok(java_long)
+        },
+
+        ScalarValue::UInt8(Some(val)) => {
+            let java_short = env.new_object(
+                "java/lang/Integer",
+                "(S)V",
+                &[JValueGen::Int(*val as jint)],
+            )?;
+            Ok(java_short)
+        },
+
+        ScalarValue::UInt16(Some(val)) => {
+            let java_integer = env.new_object(
+                "java/lang/Integer",
+                "(I)V",
+                &[JValueGen::Int(*val as jint)],
+            )?;
+            Ok(java_integer)
+        },
+
+        ScalarValue::UInt32(Some(val)) => {
+            let java_long = env.new_object(
+                "java/lang/Long",
+                "(J)V",
+                &[JValueGen::Long(*val as i64)],
+            )?;
+            Ok(java_long)
+        },
+
+        // todo: make sure if uint64 is transferred correctly
+        ScalarValue::UInt64(Some(val)) => {
+            let val_str = val.to_string();
+            let java_string = env.new_string(&val_str)?;
+            let java_bigint = env.new_object(
+                "java/math/BigInteger",
+                "(Ljava/lang/String;)V",
+                &[JValueGen::Object(&java_string)],
+            )?;
+            Ok(java_bigint)
+        },
+
+        ScalarValue::Float16(Some(val)) => {
+            let java_float = env.new_object(
+                "java/lang/Float",
+                "(F)V",
+                &[JValueGen::Float(f32::from(*val) as jfloat)],
+            )?;
+            Ok(java_float)
+        },
+
+        ScalarValue::Float32(Some(val)) => {
+            let java_float = env.new_object(
+                "java/lang/Float",
+                "(F)V",
+                &[JValueGen::Float(*val as jfloat)],
+            )?;
+            Ok(java_float)
+        },
+
+        // 64位浮点数 -> java.lang.Double
+        ScalarValue::Float64(Some(val)) => {
+            let java_double = env.new_object(
+                "java/lang/Double",
+                "(D)V",
+                &[JValueGen::Double(*val as jdouble)],
+            )?;
+            Ok(java_double)
+        },
+
+        ScalarValue::Utf8(Some(val)) | ScalarValue::LargeUtf8(Some(val)) => {
+            let java_string = env.new_string(val)?;
+            Ok(java_string.into())
+        },
+
+        ScalarValue::Binary(Some(val)) | ScalarValue::LargeBinary(Some(val)) => {
+            let java_byte_array = env.byte_array_from_slice(val)?;
+            Ok(java_byte_array.into())
+        },
+
+        ScalarValue::FixedSizeBinary(_, Some(val)) => {
+            let java_byte_array = env.byte_array_from_slice(val)?;
+            Ok(java_byte_array.into())
+        },
+
+        ScalarValue::Date32(Some(val)) => {
+            let java_date = env.new_object(
+                "java/lang/Integer",
+                "(I)V",
+                &[JValueGen::Int(*val as jint)],
+            )?;
+            Ok(java_date)
+        },
+
+        ScalarValue::Date64(Some(val)) => {
+            let java_date = env.new_object(
+                "java/lang/Long",
+                "(J)V",
+                &[JValueGen::Long(*val)],
+            )?;
+            Ok(java_date)
+        },
+
+        ScalarValue::TimestampSecond(Some(val), _) => {
+            let java_timestamp = env.new_object(
+                "java/lang/Long",
+                "(J)V",
+                &[JValueGen::Long(*val)],
+            )?;
+            Ok(java_timestamp)
+        },
+
+        ScalarValue::TimestampMillisecond(Some(val), _) => {
+            let java_timestamp = env.new_object(
+                "java/lang/Long",
+                "(J)V",
+                &[JValueGen::Long(*val)],
+            )?;
+            Ok(java_timestamp)
+        },
+
+        ScalarValue::TimestampMicrosecond(Some(val), _) => {
+            let java_timestamp = env.new_object(
+                "java/lang/Long",
+                "(J)V",
+                &[JValueGen::Long(*val)],
+            )?;
+            Ok(java_timestamp)
+        },
+
+        ScalarValue::TimestampNanosecond(Some(val), _) => {
+            let java_timestamp = env.new_object(
+                "java/lang/Long",
+                "(J)V",
+                &[JValueGen::Long(*val)],
+            )?;
+            Ok(java_timestamp)
+        },
+
+        ScalarValue::Decimal128(Some(val), precision, scale) => {
+            let unscaled_val = val.to_string();
+            let java_unscaled_string = env.new_string(&unscaled_val)?;
+            let java_unscaled_bigint = env.new_object(
+                "java/math/BigInteger",
+                "(Ljava/lang/String;)V",
+                &[JValueGen::Object(&java_unscaled_string)],
+            )?;
+
+            let java_decimal = env.new_object(
+                "java/math/BigDecimal",
+                "(Ljava/math/BigInteger;I)V",
+                &[JValueGen::Object(&java_unscaled_bigint), JValueGen::Int(*scale as i32)],
+            )?;
+            Ok(java_decimal)
+        },
+
+        ScalarValue::Decimal256(Some(val), precision, scale) => {
+            let unscaled_val = val.to_string();
+            let java_unscaled_string = env.new_string(&unscaled_val)?;
+            let java_unscaled_bigint = env.new_object(
+                "java/math/BigInteger",
+                "(Ljava/lang/String;)V",
+                &[JValueGen::Object(&java_unscaled_string)],
+            )?;
+
+            let java_decimal = env.new_object(
+                "java/math/BigDecimal",
+                "(Ljava/math/BigInteger;I)V",
+                &[JValueGen::Object(&java_unscaled_bigint), JValueGen::Int(*scale as i32)],
+            )?;
+            Ok(java_decimal)
+        },
+
+
+        ScalarValue::Null | _ => {
+            Ok(JObject::null())
+        }
+    }
+}
+
+fn i64_map_to_java<'local>(
+    env: &mut JNIEnv<'local>,
+    rust_map: &HashMap<i32, i64>,
+) -> Result<JObject<'local>> {
+    let java_hashmap = env.new_object(
+        "java/util/HashMap",
+        "(I)V",
+        &[JValueGen::Int(rust_map.len() as i32)],
+    )?;
+
+    for (&key, &value) in rust_map {
+        let java_key = env.new_object(
+            "java/lang/Integer",
+            "(I)V",
+            &[JValueGen::Int(key)],
+        )?;
+
+        let java_value = env.new_object(
+            "java/lang/Long",
+            "(J)V",
+            &[JValueGen::Long(value as jlong)],
+        )?;
+
+        env.call_method(
+            &java_hashmap,
+            "put",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            &[JValueGen::Object(&java_key), JValueGen::Object(&java_value)],
+        )?;
+    }
+
+    Ok(java_hashmap)
+}
+
+fn scalar_value_map_to_java<'local>(
+    env: &mut JNIEnv<'local>,
+    rust_map: &HashMap<i32, ScalarValue>,
+) -> Result<JObject<'local>> {
+    let java_hashmap = env.new_object(
+        "java/util/HashMap",
+        "(I)V",
+        &[JValueGen::Int(rust_map.len() as i32)],
+    )?;
+
+    for (&key, value) in rust_map {
+        let java_key = env.new_object(
+            "java/lang/Integer",
+            "(I)V",
+            &[JValueGen::Int(key)],
+        )?;
+
+        let java_value = scalar_value_to_java_object(env, &value)?;
+
+        env.call_method(
+            &java_hashmap,
+            "put",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            &[JValueGen::Object(&java_key), JValueGen::Object(&java_value)],
+        )?;
+    }
+
+    Ok(java_hashmap)
+}
+
+
+impl IntoJava for Statistics {
+    fn into_java<'local>(self, env: &mut JNIEnv<'local>) -> Result<JObject<'local>> {
+
+        let value_counts_map = i64_map_to_java(env, &self.value_counts)?;
+        let null_value_counts_map = i64_map_to_java(env, &self.null_value_counts)?;
+        let nan_value_counts_map = i64_map_to_java(env, &self.nan_value_counts)?;
+        let min_values_map = scalar_value_map_to_java(env, &self.min_values)?;
+        let max_values_map = scalar_value_map_to_java(env, &self.max_values)?;
+
+        let java_stats = env.new_object(
+            "com/lancedb/lance/Statistics",
+            "(JLjava/util/Map;Ljava/util/Map;Ljava/util/Map;Ljava/util/Map;Ljava/util/Map;)V",
+            &[
+                JValueGen::Long(self.row_count as jlong),
+                JValueGen::Object(&value_counts_map),
+                JValueGen::Object(&null_value_counts_map),
+                JValueGen::Object(&nan_value_counts_map),
+                JValueGen::Object(&min_values_map),
+                JValueGen::Object(&max_values_map),
+            ],
+        )?;
+        Ok(java_stats)
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_lancedb_lance_file_LanceFileWriter_statisticsNative<'local>(
+    mut env: JNIEnv<'local>,
+    writer: JObject,
+) -> JObject<'local> {
+    let statistics_result = {
+        let writer = match unsafe { env.get_rust_field::<_, _, BlockingFileWriter>(writer, NATIVE_WRITER) } {
+            Ok(writer) => writer,
+            Err(_) => return JObject::null(),
+        };
+
+        let mut writer_guard = match writer.inner.lock() {
+            Ok(guard) => guard,
+            Err(_) => return JObject::null(),
+        };
+
+        writer_guard.generate_statistics()
+    }; // writer_guard在这里被释放
+
+    // 然后转换为Java对象
+    match statistics_result {
+        Ok(stats) => {
+            match stats.into_java(&mut env) {
+                Ok(java_obj) => java_obj,
+                Err(_) => JObject::null(),
+            }
+        },
+        Err(_) => JObject::null(),
+    }
 }
 
 #[no_mangle]
