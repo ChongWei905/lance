@@ -119,17 +119,17 @@ pub struct StatisticsGenerator {
     value_counts: HashMap<i32, i64>,
     null_value_counts: HashMap<i32, i64>,
     nan_value_counts: HashMap<i32, i64>,
-    min_values: HashMap<i32, MinAccumulator>,
-    max_values: HashMap<i32, MaxAccumulator>,
+    min_value_generators: HashMap<i32, MinAccumulator>,
+    max_value_generators: HashMap<i32, MaxAccumulator>,
 }
 
 pub struct Statistics {
-    row_count: i64,
-    value_counts: HashMap<i32, i64>,
-    null_value_counts: HashMap<i32, i64>,
-    nan_value_counts: HashMap<i32, i64>,
-    min_values: HashMap<i32, ScalarValue>,
-    max_values: HashMap<i32, ScalarValue>,
+    pub row_count: i64,
+    pub value_counts: HashMap<i32, i64>,
+    pub null_value_counts: HashMap<i32, i64>,
+    pub nan_value_counts: HashMap<i32, i64>,
+    pub min_values: HashMap<i32, ScalarValue>,
+    pub max_values: HashMap<i32, ScalarValue>,
 }
 
 fn initial_column_metadata() -> pbfile::ColumnMetadata {
@@ -150,8 +150,8 @@ impl StatisticsGenerator {
             value_counts: HashMap::new(),
             null_value_counts: HashMap::new(),
             nan_value_counts: HashMap::new(),
-            min_values: HashMap::new(),
-            max_values: HashMap::new(),
+            min_value_generators: HashMap::new(),
+            max_value_generators: HashMap::new(),
         }
     }
 
@@ -166,9 +166,9 @@ impl StatisticsGenerator {
             *self.nan_value_counts.entry(field_idx as i32).or_insert(0) += nan_count;
 
             let items_type = batch.schema().field(field_idx).data_type().clone();
-            let min_accumulator = self.min_values.entry(field_idx as i32)
+            let min_accumulator = self.min_value_generators.entry(field_idx as i32)
                 .or_insert(MinAccumulator::try_new(&items_type).unwrap());
-            let max_accumulator = self.max_values.entry(field_idx as i32)
+            let max_accumulator = self.max_value_generators.entry(field_idx as i32)
                 .or_insert(MaxAccumulator::try_new(&items_type).unwrap());
             min_accumulator.update_batch(std::slice::from_ref(col));
             max_accumulator.update_batch(std::slice::from_ref(col));
@@ -202,14 +202,38 @@ impl StatisticsGenerator {
         }
     }
 
-    fn generate_statistics(&self) -> Statistics {
+    fn generate_statistics(self) -> Statistics {
+        let min_values: HashMap<i32, ScalarValue> = self.min_value_generators
+            .into_iter()
+            .filter_map(|(field_idx, mut min_value_generator)| {
+                // 添加 mut 关键字获取可变引用
+                match min_value_generator.evaluate() {
+                    Ok(value) => Some((field_idx, value)),
+                    Err(_) => None, // 忽略错误或记录日志
+                }
+            })
+            .collect();
+        let max_values: HashMap<i32, ScalarValue> = self.max_value_generators
+            .into_iter()
+            .filter_map(|(field_idx, mut max_value_generator)| {
+                // 假设 MaxAccumulator 也有 evaluate() 方法
+                // 如果方法名不同，请替换为正确的方法名
+                match max_value_generator.evaluate() {
+                    Ok(value) => Some((field_idx, value)),
+                    Err(_) => None,
+                }
+            })
+            .collect();
+
+
+
         Statistics {
             row_count: self.row_count,
             value_counts: self.value_counts.clone(),
-            null_value_counts: self.null_value_counts,
-            nan_value_counts: self.nan_value_counts,
-            min_values: self.min_values.iter().map(|(k, v)| (*k, v.min())).collect(),
-            max_values: self.max_values.iter().map(|(k, v)| (*k, v.max())).collect(),
+            null_value_counts: self.null_value_counts.clone(),
+            nan_value_counts: self.nan_value_counts.clone(),
+            min_values,
+            max_values,
         }
     }
 }
@@ -669,6 +693,12 @@ impl FileWriter {
             LanceFileVersion::V2_1 => (2, 1),
             _ => panic!("Unsupported version: {}", version),
         }
+    }
+
+    pub fn generate_statistics(&mut self) -> Result<Statistics> {
+        let statistics_generator = self.statistics.take().unwrap();
+
+        Ok(statistics_generator.generate_statistics())
     }
 
     /// Finishes writing the file

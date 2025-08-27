@@ -14,6 +14,7 @@
 package com.lancedb.lance.file;
 
 import com.lancedb.lance.JniLoader;
+import com.lancedb.lance.Statistics;
 
 import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
@@ -47,6 +48,8 @@ public class LanceFileWriter implements AutoCloseable {
 
   private native void writeNative(long batchMemoryAddress, long schemaMemoryAddress)
       throws IOException;
+
+  private native Statistics statisticsNative() throws IOException;
 
   private LanceFileWriter() {}
 
@@ -107,6 +110,10 @@ public class LanceFileWriter implements AutoCloseable {
           allocator, batch, dictionaryProvider, ffiArrowArray, ffiArrowSchema);
       writeNative(ffiArrowArray.memoryAddress(), ffiArrowSchema.memoryAddress());
     }
+  }
+
+  public Statistics statistics() throws IOException {
+    return statisticsNative();
   }
 
   public long length() {

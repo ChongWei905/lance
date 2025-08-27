@@ -141,6 +141,13 @@ public class FileReaderWriterTest {
       try (VectorSchemaRoot batch = createBatch(allocator)) {
         writer.write(batch);
       }
+      Statistics statistics = writer.statistics();
+      System.out.println(statistics.getRowCount());
+      statistics.getValueCounts().forEach((k, v) -> System.out.println(k + " : " + v));
+      statistics.getNullValueCounts().forEach((k, v) -> System.out.println(k + " : " + v));
+      statistics.getNanValueCounts().forEach((k, v) -> System.out.println(k + " : " + v));
+      statistics.getMaxValues().forEach((k, v) -> System.out.println(k + " : " + v));
+      statistics.getMinValues().forEach((k, v) -> System.out.println(k + " : " + v));
       writer.close();
       System.out.println("aaaaaaaa");
       System.out.println(writer.length());
