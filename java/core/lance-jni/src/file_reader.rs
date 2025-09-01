@@ -426,7 +426,7 @@ pub extern "system" fn Java_com_lancedb_lance_file_LanceFileReader_readAllNative
         reader_projection = Some(ReaderProjection::from_whole_schema(
             reader.inner.schema(),
             reader.inner.metadata().version()
-        ))
+        ));
     }
 
     if !selection_ranges.is_null() {
@@ -527,6 +527,11 @@ pub extern "system" fn Java_com_lancedb_lance_file_LanceFileReader_takeNative<'l
             &schema,
             names.as_slice(),
         ).unwrap());
+    } else {
+        reader_projection = Some(ReaderProjection::from_whole_schema(
+            reader.inner.schema(),
+            reader.inner.metadata().version()
+        ));
     }
 
     if row_indices.is_null() {
