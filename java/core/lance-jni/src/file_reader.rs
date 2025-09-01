@@ -390,7 +390,7 @@ pub extern "system" fn Java_com_lancedb_lance_file_LanceFileReader_readAllNative
             reader_projection = Some(ReaderProjection::from_whole_schema(
                 reader.inner.schema(),
                 reader.inner.metadata().version()
-            ))
+            ));
         }
 
         if !selection_ranges.is_null() {
@@ -482,16 +482,21 @@ pub extern "system" fn Java_com_lancedb_lance_file_LanceFileReader_takeNative(
 
         let file_version = reader.inner.metadata().version();
 
-        if !projected_names.is_null() {
-            let schema = Schema::try_from(reader.schema()?.as_ref())?;
-            let column_names: Vec<String> = env.get_strings(&projected_names)?;
-            let names: Vec<&str> = column_names.iter().map(|s| s.as_str()).collect();
-            reader_projection = Some(ReaderProjection::from_column_names(
-                file_version,
-                &schema,
-                names.as_slice(),
-            )?);
-        }
+    if !projected_names.is_null() {
+        let schema = Schema::try_from(reader.schema().unwrap().as_ref()).unwrap();
+        let column_names: Vec<String> = env.get_strings(&projected_names).unwrap();
+        let names: Vec<&str> = column_names.iter().map(|s| s.as_str()).collect();
+        reader_projection = Some(ReaderProjection::from_column_names(
+            file_version,
+            &schema,
+            names.as_slice(),
+        ).unwrap());
+    } else {
+        reader_projection = Some(ReaderProjection::from_whole_schema(
+            reader.inner.schema(),
+            reader.inner.metadata().version()
+        ));
+    }
 
         if row_indices.is_null() {
             return Err(Error::input_error(
