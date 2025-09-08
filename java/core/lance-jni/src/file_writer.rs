@@ -321,7 +321,7 @@ fn inner_open_with_java_io<'local>(
         Result::Ok(FileWriter::new_custom_io(
             callback_writer,
             FileWriterOptions {
-                format_version: Some(LanceFileVersion::V2_1),
+                format_version: Some(LanceFileVersion::V2_0),
                 ..Default::default()
             },
         ))
