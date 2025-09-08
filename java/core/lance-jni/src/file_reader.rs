@@ -43,6 +43,7 @@ use lance_io::{
 use object_store::path::Path;
 use lance_core::ArrowResult;
 use snafu::location;
+use url::Url;
 
 pub const NATIVE_READER: &str = "nativeFileReaderHandle";
 
@@ -266,7 +267,13 @@ fn inner_open_java_io<'local>(
     path_str_obj: JString,
 ) -> Result<JObject<'local>> {
     let path_str: String = env.get_string(&path_str_obj)?.into();
-    let path = Path::parse(&path_str)
+    let path_str_processed = if let Ok(url) = Url::parse(&path_str) {
+        url.path().to_string()
+    } else {
+        path_str
+    };
+
+    let path = Path::parse(&path_str_processed)
         .map_err(|e| Error::input_error(format!("Invalid path string: {}", e)))?;
     let callback_reader = Arc::new(CallbackReader::new(env, input_stream)?);
 
